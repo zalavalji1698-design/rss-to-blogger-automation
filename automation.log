@@ -1,0 +1,8 @@
+2026-10-05 13:59:16,683 | INFO     | ================================================================================
+2026-10-05 13:59:16,683 | INFO     | 🚀 RSS to Blogger Automation - Advanced Version
+2026-10-05 13:59:16,683 | INFO     | ================================================================================
+2026-10-05 13:59:16,684 | INFO     | ⏰ Execution Start: 2026-10-05 13:59:16
+2026-10-05 13:59:16,874 | INFO     | file_cache is only supported with oauth2client<4.0.0
+2026-10-05 13:59:16,875 | INFO     | 📡 Reading feed: https://viralkand.com/feed/
+2026-10-05 13:59:20,003 | INFO     | 📡 Reading feed: https://maal69.nl/feed/
+2026-10-05 13:59:39,466 | WARNING  | ⚠️ No entries found in RSS feeds
