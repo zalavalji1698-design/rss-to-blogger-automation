@@ -1,26 +1,37 @@
 import os
 import json
-from typing import List, Dict, Any
+import sys
+import logging
+from typing import List, Set, Optional
 import feedparser
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
-# ----------------------------
-# Config from environment
-# ----------------------------
-BLOG_ID = os.environ.get("BLOGGER_BLOG_ID")
-RSS_FEED_URLS = os.environ.get("RSS_FEED_URLS", "").split(",")
-CLIENT_ID = os.environ.get("BLOGGER_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("BLOGGER_CLIENT_SECRET")
-REFRESH_TOKEN = os.environ.get("BLOGGER_REFRESH_TOKEN")
+# ==========================
+# Logger Setup
+# ==========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ==========================
+# Environment Variables
+# ==========================
+BLOG_ID = os.environ.get("BLOGGER_BLOG_ID", "").strip()
+CLIENT_ID = os.environ.get("BLOGGER_CLIENT_ID", "").strip()
+CLIENT_SECRET = os.environ.get("BLOGGER_CLIENT_SECRET", "").strip()
+REFRESH_TOKEN = os.environ.get("BLOGGER_REFRESH_TOKEN", "").strip()
+RSS_FEED_URLS = os.environ.get("RSS_FEED_URLS", "").strip()
 
 POSTED_FILE = "posted_urls.json"
 
-# ----------------------------
-# Load previously posted URLs
-# ----------------------------
-def load_posted_urls() -> set:
+# ==========================
+# Load Posted URLs
+# ==========================
+def load_posted_urls() -> Set[str]:
     if not os.path.exists(POSTED_FILE):
         return set()
 
@@ -33,18 +44,21 @@ def load_posted_urls() -> set:
     except Exception:
         return set()
 
-def save_posted_urls(urls: set):
+# ==========================
+# Save Posted URLs
+# ==========================
+def save_posted_urls(urls: Set[str]):
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(urls), f, ensure_ascii=False, indent=2)
 
-# ----------------------------
-# Get Blogger Service
-# ----------------------------
+# ==========================
+# Get Blogger Credentials
+# ==========================
 def get_blogger_service():
-    if not all([CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, BLOG_ID]):
+    if not all([BLOG_ID, CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN]):
         raise ValueError(
-            "Missing one or more env vars: "
-            "BLOGGER_CLIENT_ID, BLOGGER_CLIENT_SECRET, BLOGGER_REFRESH_TOKEN, BLOGGER_BLOG_ID"
+            "Missing required env vars: "
+            "BLOGGER_BLOG_ID, BLOGGER_CLIENT_ID, BLOGGER_CLIENT_SECRET, BLOGGER_REFRESH_TOKEN"
         )
 
     creds = Credentials(
@@ -60,9 +74,9 @@ def get_blogger_service():
     service = build("blogger", "v3", credentials=creds)
     return service
 
-# ----------------------------
-# Extract content safely
-# ----------------------------
+# ==========================
+# Get Entry Content
+# ==========================
 def get_entry_content(entry) -> str:
     content = getattr(entry, "summary", None) or getattr(entry, "description", None) or ""
     if hasattr(content, "value"):
@@ -71,21 +85,19 @@ def get_entry_content(entry) -> str:
         return content
     return "<p>No content available.</p>"
 
-# ----------------------------
-# Publish to Blogger
-# ----------------------------
+# ==========================
+# Publish Post
+# ==========================
 def publish_post(service, entry):
     title = getattr(entry, "title", "Untitled Post") or "Untitled Post"
     link = getattr(entry, "link", None)
-    content = get_entry_content(entry)
-
     if not link:
         return False
 
     body = {
         "kind": "blogger#post",
         "title": title,
-        "content": content
+        "content": get_entry_content(entry)
     }
 
     try:
@@ -93,17 +105,20 @@ def publish_post(service, entry):
         print(f"✅ Posted: {title}")
         return True
     except Exception as e:
-        print(f"❌ Failed to post: {title} | Error: {e}")
+        print(f"❌ Failed to post: {title} | {e}")
         return False
 
-# ----------------------------
-# Main logic
-# ----------------------------
+# ==========================
+# Main Script
+# ==========================
 def main():
-    # Clean feed URLs
-    feed_urls = [url.strip() for url in RSS_FEED_URLS if url.strip()]
+    if not BLOG_ID or not RSS_FEED_URLS:
+        logger.error("BLOGGER_BLOG_ID और RSS_FEED_URLS environment variable set नहीं है।")
+        return
+
+    feed_urls = [url.strip() for url in RSS_FEED_URLS.split(",") if url.strip()]
     if not feed_urls:
-        print("No RSS feeds configured. Please set RSS_FEED_URLS secret.")
+        logger.error("RSS_FEED_URLS खाली है।")
         return
 
     posted_urls = load_posted_urls()
@@ -115,6 +130,10 @@ def main():
             feed = feedparser.parse(feed_url)
             entries = getattr(feed, "entries", None) or []
 
+            if not entries:
+                print("No entries found in this feed.")
+                continue
+
             for entry in reversed(entries[:10]):
                 post_link = getattr(entry, "link", None)
                 if not post_link:
@@ -124,16 +143,13 @@ def main():
                     print(f"Already posted: {post_link}")
                     continue
 
-                title = getattr(entry, "title", "Untitled Post") or "Untitled Post"
-                print(f"New post found: {title}")
-
-                posted = publish_post(service, entry)
-                if posted:
+                print(f"New post found: {getattr(entry, 'title', 'Untitled Post')}")
+                if publish_post(service, entry):
                     posted_urls.add(post_link)
                     save_posted_urls(posted_urls)
 
         except Exception as e:
-            print(f"Error while reading feed: {feed_url} | {e}")
+            print(f"RSS parse error for {feed_url}: {e}")
 
     print("\nAutomation completed.")
 
