@@ -3,7 +3,7 @@ name: RSS to Blogger Automation
 on:
   schedule:
     - cron: "0 * * * *"   # हर 1 घंटे में
-  workflow_dispatch:
+  workflow_dispatch:      # Manual trigger के लिए
 
 permissions:
   contents: write
@@ -11,21 +11,35 @@ permissions:
 jobs:
   rss_to_blogger:
     runs-on: ubuntu-latest
-
+    
     steps:
+      # Step 1: Repository को checkout करें
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # पूरा history fetch करें
 
+      # Step 2: Python environment setup करें
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # Step 3: Dependencies install करें
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Step 4: Git configuration करें
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global pull.rebase true
+          echo "✅ Git configured"
+
+      # Step 5: RSS to Blogger automation script run करें
       - name: Run RSS to Blogger automation
         env:
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
@@ -34,16 +48,156 @@ jobs:
           BLOGGER_REFRESH_TOKEN: ${{ secrets.BLOGGER_REFRESH_TOKEN }}
           RSS_FEED_URLS: ${{ secrets.RSS_FEED_URLS }}
         run: |
+          echo "🚀 Starting RSS to Blogger automation..."
           python main.py
+          echo "✅ Automation completed"
 
-      - name: Commit and push if changed
+      # Step 6: Remote changes को fetch करें
+      - name: Fetch remote changes
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add posted_urls.json automation.log
-          if git diff --cached --quiet; then
-            echo "✅ No changes to commit"
+          echo "📥 Fetching remote changes..."
+          git fetch origin main --quiet
+          echo "✅ Remote fetch completed"
+
+      # Step 7: Status check करें
+      - name: Check git status
+        run: |
+          echo "📊 Git Status:"
+          git status
+          echo ""
+          echo "📋 Modified files:"
+          git diff --name-only
+          echo ""
+          echo "🔍 Staged changes:"
+          git diff --cached --name-only
+
+      # Step 8: Rebase करें (अगर remote changes हों तो)
+      - name: Rebase with remote
+        run: |
+          echo "🔄 Rebasing with remote branch..."
+          if git rev-parse @{u} >/dev/null 2>&1; then
+            echo "📌 Remote branch exists, rebasing..."
+            git rebase origin/main || {
+              echo "⚠️ Rebase conflict detected, aborting rebase..."
+              git rebase --abort
+              echo "ℹ️ Will attempt merge instead"
+            }
           else
-            git commit -m "✅ RSS posts automated - $(date '+%Y-%m-%d %H:%M:%S')"
-            git push
+            echo "ℹ️ No upstream branch configured"
           fi
+          echo "✅ Rebase step completed"
+
+      # Step 9: Local changes को add करें
+      - name: Stage changes
+        run: |
+          echo "📝 Staging changes..."
+          if [ -f "posted_urls.json" ]; then
+            git add posted_urls.json
+            echo "✅ posted_urls.json staged"
+          fi
+          if [ -f "automation.log" ]; then
+            git add automation.log
+            echo "✅ automation.log staged"
+          fi
+          echo ""
+          echo "📋 Current staged files:"
+          git diff --cached --name-only
+
+      # Step 10: Commit करें (अगर changes हों तो)
+      - name: Commit changes
+        run: |
+          echo "💾 Checking for changes..."
+          if git diff --cached --quiet; then
+            echo "ℹ️ No changes to commit"
+            exit 0
+          fi
+          
+          echo "📝 Committing changes..."
+          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+          git commit -m "✅ RSS Automation: $(date '+%Y-%m-%d %H:%M:%S')" \
+            --author="github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          
+          echo "✅ Commit created"
+          git log --oneline -1
+
+      # Step 11: Push करें with force handling
+      - name: Push changes with rebase
+        run: |
+          echo "🚀 Pushing changes..."
+          
+          # पहले fetch करें
+          git fetch origin main --quiet
+          
+          # Check if local branch is behind remote
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "⚠️ Local branch is behind remote, rebasing..."
+            git rebase origin/main || {
+              echo "❌ Rebase failed, force pushing local changes..."
+              git push origin main --force-with-lease
+              exit 0
+            }
+          fi
+          
+          # Normal push करें
+          git push origin main
+          echo "✅ Push completed successfully"
+
+      # Step 12: Push failure handling
+      - name: Handle push failure
+        if: failure()
+        run: |
+          echo "⚠️ Push failed, attempting recovery..."
+          
+          echo "📊 Checking git log:"
+          git log --oneline -5
+          
+          echo ""
+          echo "📊 Checking remote status:"
+          git ls-remote origin main
+          
+          echo ""
+          echo "🔄 Final attempt with force-with-lease:"
+          git fetch origin main --quiet
+          git push origin main --force-with-lease || {
+            echo "❌ All push attempts failed"
+            exit 1
+          }
+
+      # Step 13: Success notification
+      - name: Automation success summary
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "✅ RSS to Blogger Automation - SUCCESS"
+          echo "=========================================="
+          echo "⏰ Execution Time: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "📊 Repository: ${{ github.repository }}"
+          echo "🔗 Commit: $(git rev-parse --short HEAD)"
+          echo "📝 Branch: $(git rev-parse --abbrev-ref HEAD)"
+          echo "=========================================="
+          
+          if [ -f "automation.log" ]; then
+            echo ""
+            echo "📋 Recent Log Entries:"
+            tail -10 automation.log
+          fi
+
+      # Step 14: Error notification
+      - name: Automation failure summary
+        if: failure()
+        run: |
+          echo "=========================================="
+          echo "❌ RSS to Blogger Automation - FAILED"
+          echo "=========================================="
+          echo "⏰ Execution Time: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "📊 Repository: ${{ github.repository }}"
+          echo "📝 Branch: $(git rev-parse --abbrev-ref HEAD)"
+          echo "=========================================="
+          
+          if [ -f "automation.log" ]; then
+            echo ""
+            echo "📋 Error Log:"
+            cat automation.log | grep -E "(ERROR|❌|Failed)" || echo "No specific errors found"
+          fi
+          
+          exit 1
