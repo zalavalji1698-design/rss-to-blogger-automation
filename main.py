@@ -14,9 +14,12 @@ import json
 import sys
 import logging
 import requests
+import time
 from typing import List, Set, Optional, Dict, Tuple
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import feedparser
 from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
@@ -133,10 +136,29 @@ class ContentScraper:
     
     def __init__(self, timeout: int = 10):
         self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update({
+        self.session = self._create_session()
+    
+    def _create_session(self) -> requests.Session:
+        """Session बनाता है with retry strategy"""
+        session = requests.Session()
+        
+        # Retry strategy with exponential backoff
+        retry_strategy = Retry(
+            total=3,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST", "HEAD"],
+            backoff_factor=1
+        )
+        
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
+        
+        return session
     
     def scrape_post(self, url: str) -> Optional[Dict]:
         """
@@ -429,37 +451,55 @@ class BloggerService:
             return False
     
     def publish_post(self, blog_id: str, title: str, content: str, labels: List[str] = None) -> Optional[str]:
-        """Blogger पर post publish करता है"""
+        """Blogger पर post publish करता है with exponential backoff"""
         if not self.service:
             logger.error("❌ Service not authenticated")
             return None
         
-        try:
-            body = {
-                "kind": "blogger#post",
-                "title": title,
-                "content": content
-            }
-            
-            if labels:
-                body["labels"] = labels
-            
-            request = self.service.posts().insert(blogId=blog_id, body=body)
-            response = request.execute()
-            
-            post_id = response.get("id")
-            post_url = response.get("url")
-            
-            logger.info(f"✅ Published: {title}")
-            logger.info(f"   🔗 URL: {post_url}")
-            logger.info(f"   🏷️  Labels: {', '.join(labels) if labels else 'None'}")
-            
-            return post_id
+        max_retries = 3
+        retry_count = 0
         
-        except Exception as e:
-            logger.error(f"❌ Publish failed: {title}")
-            logger.error(f"   Error: {e}")
-            return None
+        while retry_count < max_retries:
+            try:
+                body = {
+                    "kind": "blogger#post",
+                    "title": title,
+                    "content": content
+                }
+                
+                if labels:
+                    body["labels"] = labels
+                
+                request = self.service.posts().insert(blogId=blog_id, body=body)
+                response = request.execute()
+                
+                post_id = response.get("id")
+                post_url = response.get("url")
+                
+                logger.info(f"✅ Published: {title}")
+                logger.info(f"   🔗 URL: {post_url}")
+                logger.info(f"   🏷️  Labels: {', '.join(labels) if labels else 'None'}")
+                
+                return post_id
+            
+            except Exception as e:
+                error_str = str(e)
+                
+                # 429 error को handle करें
+                if "429" in error_str or "quota" in error_str.lower():
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        wait_time = 2 ** retry_count  # 2, 4, 8 seconds
+                        logger.warning(f"⏸️  Rate limited (429). Retrying in {wait_time}s... ({retry_count}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                
+                logger.error(f"❌ Publish failed: {title}")
+                logger.error(f"   Error: {e}")
+                return None
+        
+        logger.error(f"❌ Publish failed after {max_retries} retries: {title}")
+        return None
 
 # =====================================
 # RSS Feed Parser
@@ -612,6 +652,11 @@ class RSSBloggerAutomation:
             if post_id:
                 self.posted_urls_manager.add(entry_url)
                 published_count += 1
+                
+                # Rate limiting: हर publish के बाद wait करें
+                if idx < len(to_process):
+                    logger.info(f"   ⏳ Waiting 2 seconds before next post...")
+                    time.sleep(2)
             else:
                 logger.warning(f"   ⚠️ Failed to publish")
         
