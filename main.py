@@ -162,7 +162,7 @@ class ContentScraper:
 
     def scrape_post(self, url: str) -> Optional[Dict]:
         """
-        किसी URL से post का data scrape करता है including images and videos
+        किसी URL से post का data scrape करता है
         """
         try:
             logger.info(f"🕷️  Scraping: {url}")
@@ -260,7 +260,6 @@ class ContentScraper:
         images = []
         seen_urls = set()
 
-        # <img> tags से
         for img in soup.find_all('img'):
             src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
             if src:
@@ -269,7 +268,6 @@ class ContentScraper:
                     images.append(full_url)
                     seen_urls.add(full_url)
 
-        # Open Graph image
         og_image = soup.find('meta', property='og:image')
         if og_image and og_image.get('content'):
             og_url = og_image['content']
@@ -277,7 +275,6 @@ class ContentScraper:
                 images.insert(0, og_url)
                 seen_urls.add(og_url)
 
-        # Twitter Card image
         twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
         if twitter_image and twitter_image.get('content'):
             twitter_url = twitter_image['content']
@@ -285,7 +282,6 @@ class ContentScraper:
                 images.append(twitter_url)
                 seen_urls.add(twitter_url)
 
-        # <picture> tags से
         for picture in soup.find_all('picture'):
             for source in picture.find_all('source'):
                 srcset = source.get('srcset')
@@ -303,7 +299,6 @@ class ContentScraper:
         videos = []
         seen_urls = set()
 
-        # Iframe videos (YouTube, Vimeo, Dailymotion, etc.)
         for iframe in soup.find_all('iframe'):
             src = iframe.get('src', '')
             if src and any(platform in src for platform in ['youtube', 'youtu.be', 'vimeo', 'dailymotion', 'rumble', 'odysee']):
@@ -311,7 +306,6 @@ class ContentScraper:
                     videos.append(src)
                     seen_urls.add(src)
 
-        # <video> tags
         for video_tag in soup.find_all('video'):
             src = video_tag.get('src')
             if src:
@@ -320,7 +314,6 @@ class ContentScraper:
                     videos.append(full_url)
                     seen_urls.add(full_url)
 
-            # <source> tags inside <video>
             for source in video_tag.find_all('source'):
                 src = source.get('src')
                 video_type = source.get('type', '')
@@ -330,7 +323,6 @@ class ContentScraper:
                         videos.append(full_url)
                         seen_urls.add(full_url)
 
-        # Data attributes से videos
         for elem in soup.find_all(['div', 'a'], class_=lambda x: x and 'video' in x.lower()):
             for attr in ['data-video-url', 'data-src', 'data-video']:
                 video_url = elem.get(attr)
@@ -356,7 +348,6 @@ class ContentScraper:
         return None
 
     def _is_valid_image(self, url: str) -> bool:
-        """Check करता है कि URL एक valid image है"""
         if not url:
             return False
 
@@ -383,10 +374,8 @@ class HTMLContentBuilder:
 
     @staticmethod
     def build_post_html(scraped_data: Dict) -> str:
-        """Scraped data को Blogger-friendly HTML में convert करता है with images, videos, and ads"""
         html = ""
 
-        # Thumbnail
         if scraped_data.get('thumbnail'):
             html += f"""
 <div style="text-align: center; margin-bottom: 25px;">
@@ -396,16 +385,13 @@ class HTMLContentBuilder:
 </div>
 """
 
-        # Main content with ads injected
         main_content = scraped_data.get('content', "")
         html += HTMLContentBuilder._inject_ads_in_content(main_content)
 
-        # Image Gallery
         if scraped_data.get('images'):
             html += "\n<div style='margin-top: 30px; padding-top: 20px; border-top: 2px solid #e0e0e0;'>"
             html += "<h3 style='color: #333; font-size: 1.3em; margin-bottom: 15px;'>📸 Image Gallery</h3>"
             html += '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin: 15px 0;">'
-
             for idx, img_url in enumerate(scraped_data['images'][:12], 1):
                 html += f"""
 <div style="overflow: hidden; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
@@ -416,7 +402,6 @@ class HTMLContentBuilder:
             html += "</div>"
             html += ADSTERRA_ADS['banner_728x90']
 
-        # Videos
         if scraped_data.get('videos'):
             html += "\n<div style='margin-top: 30px; padding-top: 20px; border-top: 2px solid #e0e0e0;'>"
             html += "<h3 style='color: #333; font-size: 1.3em; margin-bottom: 15px;'>🎥 Videos</h3>"
@@ -479,10 +464,8 @@ class HTMLContentBuilder:
             html += "</div>"
             html += ADSTERRA_ADS['banner_468x60']
 
-        # Final native ad
         html += ADSTERRA_ADS['native_banner']
 
-        # Original source link
         html += f"""
 <div style="margin-top: 30px; padding: 15px; border-top: 2px solid #e0e0e0; background-color: #f5f5f5; border-radius: 5px;">
     <p style="margin: 0; color: #666;">
@@ -498,7 +481,6 @@ class HTMLContentBuilder:
 
     @staticmethod
     def _inject_ads_in_content(html: str) -> str:
-        """HTML के बीच-बीच में ads inject करता है (हर 3 paragraphs के बाद)"""
         if not html:
             return html
 
@@ -528,7 +510,6 @@ class HTMLContentBuilder:
 
     @staticmethod
     def _extract_youtube_id(url: str) -> Optional[str]:
-        """YouTube URL से video ID निकालता है"""
         if 'youtube.com/watch' in url:
             try:
                 return url.split('v=')[1].split('&')[0]
@@ -560,7 +541,6 @@ class BloggerService:
         self.service = None
 
     def authenticate(self) -> bool:
-        """Google OAuth से authenticate करता है"""
         try:
             logger.info("🔐 Authenticating with Google Blogger API...")
 
@@ -583,7 +563,6 @@ class BloggerService:
             return False
 
     def publish_post(self, blog_id: str, title: str, content: str, labels: List[str] = None) -> Optional[str]:
-        """Blogger पर post publish करता है with exponential backoff for 429 rate limiting errors"""
         if not self.service:
             logger.error("❌ Service not authenticated")
             return None
@@ -619,7 +598,6 @@ class BloggerService:
             except Exception as e:
                 error_str = str(e)
 
-                # 429 Rate Limiting या Quota Exceeded को handle करना
                 if "429" in error_str or "quota" in error_str.lower() or "exhausted" in error_str.lower():
                     retry_count += 1
 
@@ -635,7 +613,6 @@ class BloggerService:
                         logger.error(f"❌ Publish failed: {title}")
                         return None
 
-                # अन्य errors
                 logger.error(f"❌ Publish failed: {title}")
                 logger.error(f"   Error: {e}")
                 return None
@@ -651,7 +628,6 @@ class RSSFeedParser:
 
     @staticmethod
     def parse_feeds(feed_urls: List[str], max_entries: int = 20) -> List[Dict]:
-        """RSS feeds को parse करके entries return करता है"""
         all_entries = []
 
         for feed_url in feed_urls:
@@ -694,7 +670,6 @@ class RSSFeedParser:
 
     @staticmethod
     def is_today_post(published_date: str) -> bool:
-        """Check करता है कि post आज का है या नहीं"""
         if not published_date:
             return True
 
@@ -718,24 +693,19 @@ class RSSBloggerAutomation:
         self.scraper = ContentScraper()
 
     def run(self) -> bool:
-        """Main automation flow"""
-
         logger.info("=" * 100)
         logger.info("🚀 RSS to Blogger Automation with Content Extraction, Media & Ads")
         logger.info("=" * 100)
         logger.info(f"⏰ Execution Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # Step 1: Validate config
         if not all([BLOG_ID, CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, RSS_FEED_URLS]):
             logger.error("❌ Missing required environment variables")
             logger.error("   Required: BLOGGER_BLOG_ID, BLOGGER_CLIENT_ID, BLOGGER_CLIENT_SECRET, BLOGGER_REFRESH_TOKEN, RSS_FEED_URLS")
             return False
 
-        # Step 2: Authenticate
         if not self.blogger_service.authenticate():
             return False
 
-        # Step 3: Parse RSS feeds
         feed_urls = [url.strip() for url in RSS_FEED_URLS.split(",") if url.strip()]
         logger.info(f"📡 Reading from {len(feed_urls)} feed(s)")
         all_entries = RSSFeedParser.parse_feeds(feed_urls, max_entries=30)
@@ -744,7 +714,6 @@ class RSSBloggerAutomation:
             logger.warning("⚠️ No RSS entries found")
             return True
 
-        # Step 4: Separate today's posts
         todays_posts = [e for e in all_entries if RSSFeedParser.is_today_post(e.get("published", ""))]
         other_posts = [e for e in all_entries if not RSSFeedParser.is_today_post(e.get("published", ""))]
         to_process = todays_posts + other_posts
@@ -752,7 +721,6 @@ class RSSBloggerAutomation:
         logger.info(f"📅 Today's Posts: {len(todays_posts)}")
         logger.info(f"📆 Other Posts: {len(other_posts)}")
 
-        # Step 5: Process posts
         logger.info("\n📝 Processing & Publishing Posts with Media")
         logger.info("-" * 100)
 
@@ -766,13 +734,11 @@ class RSSBloggerAutomation:
 
             logger.info(f"\n[{idx}/{len(to_process)}] Processing: {entry_title[:60]}...")
 
-            # Check if already posted
             if self.posted_urls_manager.is_posted(entry_url):
                 logger.info("   ⏭️  SKIPPED (already posted)")
                 skipped_count += 1
                 continue
 
-            # Scrape content with media
             logger.info("   🕷️  Scraping content with images and videos...")
             scraped_data = self.scraper.scrape_post(entry_url)
 
@@ -787,7 +753,6 @@ class RSSBloggerAutomation:
                 logger.info(f"      📊 Media found: {len(scraped_data.get('images', []))} images, {len(scraped_data.get('videos', []))} videos")
                 html_content = HTMLContentBuilder.build_post_html(scraped_data)
 
-            # Publish
             logger.info("   📤 Publishing to Blogger...")
             labels = [AUTO_POST_LABEL, "Automated", "Curated", "Media"]
 
@@ -802,7 +767,6 @@ class RSSBloggerAutomation:
                 self.posted_urls_manager.add(entry_url)
                 published_count += 1
 
-                # Rate limiting delay
                 if idx < len(to_process):
                     logger.info("   ⏳ Waiting 3 seconds before next post...")
                     time.sleep(3)
@@ -810,10 +774,8 @@ class RSSBloggerAutomation:
                 failed_count += 1
                 logger.warning("   ⚠️ Failed to publish")
 
-        # Step 6: Save state
         self.posted_urls_manager.save()
 
-        # Summary
         logger.info("\n" + "=" * 100)
         logger.info("📊 EXECUTION SUMMARY")
         logger.info("=" * 100)
@@ -829,7 +791,6 @@ class RSSBloggerAutomation:
             logger.warning("⚠️ Automation completed with issues!")
 
         logger.info("=" * 100)
-
         return True
 
 # =====================================
@@ -840,7 +801,6 @@ def main():
         automation = RSSBloggerAutomation()
         success = automation.run()
         sys.exit(0 if success else 1)
-
     except Exception as e:
         logger.error(f"❌ Unexpected error: {e}")
         import traceback
