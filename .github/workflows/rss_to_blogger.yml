@@ -33,7 +33,8 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --global pull.rebase true
-          echo "✅ Git configured"
+          git config --global rebase.autostash true
+          echo "✅ Git configured with auto-stash enabled"
 
       - name: Run RSS to Blogger automation
         env:
@@ -45,139 +46,184 @@ jobs:
         run: |
           echo "🚀 Starting RSS to Blogger automation..."
           python main.py
-          echo "✅ Automation completed"
+          AUTOMATION_EXIT=$?
+          echo "✅ Automation script completed (Exit code: $AUTOMATION_EXIT)"
+          exit $AUTOMATION_EXIT
 
       - name: Fetch remote changes
+        if: always()
         run: |
           echo "📥 Fetching remote changes..."
           git fetch origin main --quiet
           echo "✅ Remote fetch completed"
 
       - name: Check git status
+        if: always()
         run: |
           echo "📊 Git Status:"
           git status
           echo ""
           echo "📋 Modified files:"
-          git diff --name-only
+          git diff --name-only || true
           echo ""
           echo "🔍 Staged changes:"
-          git diff --cached --name-only
+          git diff --cached --name-only || true
 
-      - name: Prepare for rebase
+      - name: Prepare for rebase - Clean unstaged changes
+        if: always()
         run: |
-          echo "🧹 Cleaning unstaged changes..."
-          git stash || true
-          echo "✅ Unstaged changes stashed"
+          echo "🧹 Cleaning unstaged changes with auto-stash..."
+          if ! git diff --quiet; then
+            echo "⚠️ Found unstaged changes, stashing them..."
+            git stash || {
+              echo "⚠️ Stash failed, resetting instead..."
+              git reset --hard HEAD
+            }
+            echo "✅ Unstaged changes handled"
+          else
+            echo "✅ No unstaged changes found"
+          fi
 
-      - name: Rebase with remote
+      - name: Reset to clean state if needed
+        if: always()
+        run: |
+          echo "🧹 Ensuring clean working directory..."
+          if git status --porcelain | grep -q .; then
+            echo "⚠️ Working directory not clean, forcing reset..."
+            git reset --hard HEAD
+            git clean -fd
+            echo "✅ Forced clean completed"
+          else
+            echo "✅ Working directory is clean"
+          fi
+
+      - name: Rebase with remote - Safe version
+        if: always()
         run: |
           echo "🔄 Rebasing with remote branch..."
-          if git rev-parse @{u} >/dev/null 2>&1; then
-            echo "📌 Remote branch exists, rebasing..."
-            git rebase origin/main || {
-              echo "⚠️ Rebase conflict detected, aborting rebase..."
-              git rebase --abort
-              echo "ℹ️ Will attempt direct merge instead"
-            }
+          git fetch origin main --quiet
+
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "⚠️ Local branch is behind remote"
+            if git rebase origin/main; then
+              echo "✅ Rebase successful"
+            else
+              echo "⚠️ Rebase failed, aborting..."
+              git rebase --abort || true
+
+              echo "🔄 Attempting merge strategy instead..."
+              if git merge origin/main -m "Merge with remote branch during automation"; then
+                echo "✅ Merge successful"
+              else
+                echo "⚠️ Merge also failed, will reset and continue..."
+                git merge --abort || true
+                git reset --hard origin/main
+                echo "✅ Reset to remote state"
+              fi
+            fi
           else
-            echo "ℹ️ No upstream branch configured"
+            echo "✅ Local branch is up to date with remote"
           fi
-          echo "✅ Rebase step completed"
 
       - name: Stage changes
+        if: always()
         run: |
           echo "📝 Staging changes..."
           if [ -f "posted_urls.json" ]; then
             git add posted_urls.json
             echo "✅ posted_urls.json staged"
           fi
+
           if [ -f "automation.log" ]; then
             git add automation.log
             echo "✅ automation.log staged"
           fi
+
           echo ""
           echo "📋 Current staged files:"
-          git diff --cached --name-only
+          git diff --cached --name-only || echo "No staged files"
 
       - name: Commit changes
+        if: always()
         run: |
-          echo "💾 Checking for changes..."
+          echo "💾 Checking for changes to commit..."
           if git diff --cached --quiet; then
             echo "ℹ️ No changes to commit"
             exit 0
           fi
 
-          echo "📝 Committing changes..."
+          echo "📝 Creating commit..."
           TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-          git commit -m "✅ RSS Automation: $(date '+%Y-%m-%d %H:%M:%S')" \
-            --author="github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          git commit -m "✅ RSS Automation: $TIMESTAMP" \
+            --author="github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>" || {
+            echo "⚠️ Commit failed, continuing..."
+            exit 0
+          }
 
           echo "✅ Commit created"
           git log --oneline -1
 
-      - name: Push changes safely
+      - name: Push changes - Safe strategy
+        if: always()
         run: |
-          echo "🚀 Pushing changes..."
-
+          echo "🚀 Pushing changes to remote..."
           git fetch origin main --quiet
 
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "⚠️ Local branch is behind remote, attempting rebase..."
-            if git rebase origin/main; then
-              echo "✅ Rebase successful, proceeding with push..."
+          if git rev-parse @{u} >/dev/null 2>&1; then
+            if [ $(git rev-list --count HEAD..@{u}) -eq 0 ]; then
+              echo "ℹ️ No new commits to push from local"
+
+              if [ $(git rev-list --count @{u}..HEAD) -gt 0 ]; then
+                echo "✅ Local has commits ahead, pushing..."
+                if git push origin main; then
+                  echo "✅ Push successful"
+                else
+                  echo "⚠️ Push failed, attempting rebase and retry..."
+                  git rebase origin/main || git rebase --abort || true
+                  git push origin main || echo "❌ Final push attempt failed"
+                fi
+              else
+                echo "✅ Everything is up-to-date"
+              fi
             else
-              echo "⚠️ Rebase failed, aborting rebase..."
-              git rebase --abort
-              echo "ℹ️ Using merge strategy instead..."
-              git merge origin/main -m "Merge with remote branch"
+              echo "✅ Local is behind remote, pulling changes..."
+              git pull origin main --rebase || {
+                echo "⚠️ Pull failed, trying merge..."
+                git merge origin/main || true
+              }
+
+              if [ $(git rev-list --count HEAD..@{u}) -eq 0 ]; then
+                echo "✅ Now up to date"
+              fi
             fi
-          fi
-
-          if git push origin main 2>&1 | grep -q "Everything up-to-date"; then
-            echo "✅ Already up-to-date, no push needed"
           else
-            echo "✅ Push completed successfully"
+            echo "ℹ️ No upstream tracking"
+            git push origin main || echo "⚠️ Push failed"
           fi
 
-      - name: Handle push failure
-        if: failure()
+      - name: Final push attempt with force option
+        if: failure() && always()
         run: |
-          echo "⚠️ Push failed, attempting recovery..."
-
-          echo "📊 Checking git log:"
-          git log --oneline -5
-
-          echo ""
-          echo "📊 Checking git status:"
+          echo "⚠️ Previous push failed, attempting final recovery..."
+          echo "📊 Current git status:"
           git status
-
           echo ""
-          echo "📊 Checking remote status:"
-          git ls-remote origin main
-
+          echo "📊 Checking log:"
+          git log --oneline -3
           echo ""
-          echo "🔄 Final attempt with force-with-lease:"
+          echo "🔄 Fetching latest remote state..."
           git fetch origin main --quiet
 
-          if ! git diff --quiet HEAD origin/main; then
-            echo "⚠️ There are differences with remote, attempting merge..."
-            git merge origin/main -m "Emergency merge during recovery" || {
-              echo "❌ Merge failed, aborting..."
-              git merge --abort
-              echo "⚠️ Unable to merge, push will be skipped"
-              exit 0
-            }
-          fi
-
-          if git push origin main 2>&1 | grep -q "Everything up-to-date"; then
-            echo "✅ Successfully pushed or already up-to-date"
+          echo "🚀 Attempting push with --force-with-lease..."
+          if git push origin main --force-with-lease; then
+            echo "✅ Force-with-lease push successful"
           else
-            echo "❌ Final push attempt failed"
-            exit 1
+            echo "ℹ️ Force-with-lease also failed, this might be intentional"
+            echo "💡 This can happen if remote has newer commits"
+            exit 0
           fi
 
-      - name: Automation success summary
+      - name: Success summary
         if: success()
         run: |
           echo "=========================================="
@@ -191,11 +237,13 @@ jobs:
 
           if [ -f "automation.log" ]; then
             echo ""
-            echo "📋 Recent Log Entries:"
-            tail -15 automation.log
+            echo "📋 Latest Log Entries (last 20 lines):"
+            tail -20 automation.log
           fi
 
-      - name: Automation failure summary
+          echo "=========================================="
+
+      - name: Failure summary
         if: failure()
         run: |
           echo "=========================================="
@@ -208,8 +256,15 @@ jobs:
 
           if [ -f "automation.log" ]; then
             echo ""
-            echo "📋 Error Log:"
-            cat automation.log | grep -E "(ERROR|❌|Failed)" || echo "No specific errors found"
+            echo "📋 Error Log (last 30 lines):"
+            tail -30 automation.log | grep -E "(ERROR|❌|Failed|RATE|quota)" || tail -30 automation.log
+          fi
+
+          echo ""
+          echo "📊 Git Status:"
+          git status || true
+
+          echo "=========================================="
           fi
 
           exit 1
