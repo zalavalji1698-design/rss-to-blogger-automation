@@ -2,8 +2,8 @@ name: RSS to Blogger Automation
 
 on:
   schedule:
-    - cron: "0 * * * *"   # हर 1 घंटे में
-  workflow_dispatch:      # Manual trigger के लिए
+    - cron: "0 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,27 +11,23 @@ permissions:
 jobs:
   rss_to_blogger:
     runs-on: ubuntu-latest
-    
+
     steps:
-      # Step 1: Repository को checkout करें
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # पूरा history fetch करें
+          fetch-depth: 0
 
-      # Step 2: Python environment setup करें
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # Step 3: Dependencies install करें
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Step 4: Git configuration करें
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
@@ -39,7 +35,6 @@ jobs:
           git config --global pull.rebase true
           echo "✅ Git configured"
 
-      # Step 5: RSS to Blogger automation script run करें
       - name: Run RSS to Blogger automation
         env:
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
@@ -52,14 +47,12 @@ jobs:
           python main.py
           echo "✅ Automation completed"
 
-      # Step 6: Remote changes को fetch करें
       - name: Fetch remote changes
         run: |
           echo "📥 Fetching remote changes..."
           git fetch origin main --quiet
           echo "✅ Remote fetch completed"
 
-      # Step 7: Status check करें
       - name: Check git status
         run: |
           echo "📊 Git Status:"
@@ -71,7 +64,12 @@ jobs:
           echo "🔍 Staged changes:"
           git diff --cached --name-only
 
-      # Step 8: Rebase करें (अगर remote changes हों तो)
+      - name: Prepare for rebase
+        run: |
+          echo "🧹 Cleaning unstaged changes..."
+          git stash || true
+          echo "✅ Unstaged changes stashed"
+
       - name: Rebase with remote
         run: |
           echo "🔄 Rebasing with remote branch..."
@@ -80,14 +78,13 @@ jobs:
             git rebase origin/main || {
               echo "⚠️ Rebase conflict detected, aborting rebase..."
               git rebase --abort
-              echo "ℹ️ Will attempt merge instead"
+              echo "ℹ️ Will attempt direct merge instead"
             }
           else
             echo "ℹ️ No upstream branch configured"
           fi
           echo "✅ Rebase step completed"
 
-      # Step 9: Local changes को add करें
       - name: Stage changes
         run: |
           echo "📝 Staging changes..."
@@ -103,7 +100,6 @@ jobs:
           echo "📋 Current staged files:"
           git diff --cached --name-only
 
-      # Step 10: Commit करें (अगर changes हों तो)
       - name: Commit changes
         run: |
           echo "💾 Checking for changes..."
@@ -111,59 +107,76 @@ jobs:
             echo "ℹ️ No changes to commit"
             exit 0
           fi
-          
+
           echo "📝 Committing changes..."
           TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
           git commit -m "✅ RSS Automation: $(date '+%Y-%m-%d %H:%M:%S')" \
             --author="github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-          
+
           echo "✅ Commit created"
           git log --oneline -1
 
-      # Step 11: Push करें with force handling
-      - name: Push changes with rebase
+      - name: Push changes safely
         run: |
           echo "🚀 Pushing changes..."
-          
-          # पहले fetch करें
-          git fetch origin main --quiet
-          
-          # Check if local branch is behind remote
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "⚠️ Local branch is behind remote, rebasing..."
-            git rebase origin/main || {
-              echo "❌ Rebase failed, force pushing local changes..."
-              git push origin main --force-with-lease
-              exit 0
-            }
-          fi
-          
-          # Normal push करें
-          git push origin main
-          echo "✅ Push completed successfully"
 
-      # Step 12: Push failure handling
+          git fetch origin main --quiet
+
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "⚠️ Local branch is behind remote, attempting rebase..."
+            if git rebase origin/main; then
+              echo "✅ Rebase successful, proceeding with push..."
+            else
+              echo "⚠️ Rebase failed, aborting rebase..."
+              git rebase --abort
+              echo "ℹ️ Using merge strategy instead..."
+              git merge origin/main -m "Merge with remote branch"
+            fi
+          fi
+
+          if git push origin main 2>&1 | grep -q "Everything up-to-date"; then
+            echo "✅ Already up-to-date, no push needed"
+          else
+            echo "✅ Push completed successfully"
+          fi
+
       - name: Handle push failure
         if: failure()
         run: |
           echo "⚠️ Push failed, attempting recovery..."
-          
+
           echo "📊 Checking git log:"
           git log --oneline -5
-          
+
+          echo ""
+          echo "📊 Checking git status:"
+          git status
+
           echo ""
           echo "📊 Checking remote status:"
           git ls-remote origin main
-          
+
           echo ""
           echo "🔄 Final attempt with force-with-lease:"
           git fetch origin main --quiet
-          git push origin main --force-with-lease || {
-            echo "❌ All push attempts failed"
-            exit 1
-          }
 
-      # Step 13: Success notification
+          if ! git diff --quiet HEAD origin/main; then
+            echo "⚠️ There are differences with remote, attempting merge..."
+            git merge origin/main -m "Emergency merge during recovery" || {
+              echo "❌ Merge failed, aborting..."
+              git merge --abort
+              echo "⚠️ Unable to merge, push will be skipped"
+              exit 0
+            }
+          fi
+
+          if git push origin main 2>&1 | grep -q "Everything up-to-date"; then
+            echo "✅ Successfully pushed or already up-to-date"
+          else
+            echo "❌ Final push attempt failed"
+            exit 1
+          fi
+
       - name: Automation success summary
         if: success()
         run: |
@@ -175,14 +188,13 @@ jobs:
           echo "🔗 Commit: $(git rev-parse --short HEAD)"
           echo "📝 Branch: $(git rev-parse --abbrev-ref HEAD)"
           echo "=========================================="
-          
+
           if [ -f "automation.log" ]; then
             echo ""
             echo "📋 Recent Log Entries:"
-            tail -10 automation.log
+            tail -15 automation.log
           fi
 
-      # Step 14: Error notification
       - name: Automation failure summary
         if: failure()
         run: |
@@ -193,11 +205,11 @@ jobs:
           echo "📊 Repository: ${{ github.repository }}"
           echo "📝 Branch: $(git rev-parse --abbrev-ref HEAD)"
           echo "=========================================="
-          
+
           if [ -f "automation.log" ]; then
             echo ""
             echo "📋 Error Log:"
             cat automation.log | grep -E "(ERROR|❌|Failed)" || echo "No specific errors found"
           fi
-          
+
           exit 1
