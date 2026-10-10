@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RSS to Blogger Automation with Content Extraction & Ads
-- RSS feeds से पोस्ट URLs निकालता है
-- हर post को scrape करके full content extract करता है
-- Images, Videos, Thumbnails extract करता है (सभी प्रकार: JPEG, PNG, MP4, iframe)
-- Adsterra ads को content के बीच add करता है
-- Blogger पर rich HTML के साथ publish करता है
-- API Rate Limiting (429 errors) को exponential backoff से handle करता है
+RSS to Blogger Automation - Gujarati Version
+આપેલા HTML ટેમ્પલેટ સાથે નવી પોસ્ટો ઓટોમેટિક પોસ્ટ કરે
+- RSS feeds વાંચે
+- ફક્ત નવી પોસ્ટો પ્રોસેસ કરે (Duplicate પોસ્ટો રોકે)
+- Title, Description, Image, Video URL extract કરે
+- Custom HTML ટેમ્પલેટ અમલ કરે
+- Blogger માં પોસ્ટ કરે
 """
 
 import os
@@ -16,6 +16,8 @@ import sys
 import logging
 import requests
 import time
+import re
+import base64
 from typing import List, Set, Optional, Dict
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
@@ -41,7 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =====================================
-# Configuration
+# Environment Configuration
 # =====================================
 BLOG_ID = os.environ.get("BLOGGER_BLOG_ID", "").strip()
 CLIENT_ID = os.environ.get("BLOGGER_CLIENT_ID", "").strip()
@@ -96,7 +98,7 @@ ADSTERRA_ADS = {
 # Posted URLs Manager
 # =====================================
 class PostedURLsManager:
-    """पहले से post किए गए URLs को manage करता है"""
+    """પહેલાંથી post કરેલ URLs ને manage કરે"""
 
     def __init__(self, file_path: str = POSTED_FILE):
         self.file_path = file_path
@@ -110,7 +112,7 @@ class PostedURLsManager:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    return set(data)
+                    return set(str(x).strip() for x in data if x)
                 return set()
         except Exception:
             return set()
@@ -124,29 +126,30 @@ class PostedURLsManager:
             logger.error(f"❌ Save error: {e}")
 
     def is_posted(self, url: str) -> bool:
-        return url in self.urls
+        return url.strip() in self.urls
 
     def add(self, url: str):
-        self.urls.add(url)
+        if url.strip():
+            self.urls.add(url.strip())
 
 # =====================================
 # Web Content Scraper
 # =====================================
 class ContentScraper:
-    """RSS post URLs से content को scrape करता है with media extraction"""
+    """RSS post URLs માંથી content scrape કરે અને media extract કરે"""
 
-    def __init__(self, timeout: int = 10):
+    def __init__(self, timeout: int = 15):
         self.timeout = timeout
         self.session = self._create_session()
 
     def _create_session(self) -> requests.Session:
-        """Session with retry strategy और exponential backoff"""
+        """Retry strategy સાથે session બનાવે"""
         session = requests.Session()
 
         retry_strategy = Retry(
             total=3,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST", "HEAD"],
+            allowed_methods=["GET", "HEAD"],
             backoff_factor=1
         )
 
@@ -155,15 +158,14 @@ class ContentScraper:
         session.mount("https://", adapter)
 
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/125.0 Safari/537.36'
         })
 
         return session
 
     def scrape_post(self, url: str) -> Optional[Dict]:
-        """
-        किसी URL से post का data scrape करता है
-        """
+        """આપેલ URL માંથી post ડેટા scrape કરે"""
         try:
             logger.info(f"🕷️  Scraping: {url}")
 
@@ -174,19 +176,17 @@ class ContentScraper:
             soup = BeautifulSoup(response.content, 'html.parser')
 
             title = self._extract_title(soup, url)
-            content = self._extract_content(soup)
-            images = self._extract_images(soup, url)
-            videos = self._extract_videos(soup, url)
-            thumbnail = self._extract_thumbnail(soup, images)
+            description = self._extract_description(soup)
+            image = self._extract_image(soup, url)
+            video = self._extract_video(soup, url)
 
-            logger.info(f"   ✅ Extracted: {len(images)} images, {len(videos)} videos")
+            logger.info(f"   ✅ Extracted: Title, Description, Image: {bool(image)}, Video: {bool(video)}")
 
             return {
                 'title': title,
-                'content': content,
-                'images': images,
-                'videos': videos,
-                'thumbnail': thumbnail,
+                'description': description,
+                'image': image,
+                'video': video,
                 'original_url': url
             }
 
@@ -195,344 +195,583 @@ class ContentScraper:
             return None
 
     def _extract_title(self, soup: BeautifulSoup, url: str) -> str:
-        """Page से title निकालता है (multiple strategies)"""
+        """Page માંથી title નીકાળે"""
+        # h1 tag
         h1 = soup.find('h1')
         if h1:
             title = h1.get_text(strip=True)
             if title:
                 return title
 
+        # og:title
         og_title = soup.find('meta', property='og:title')
         if og_title and og_title.get('content'):
-            return og_title['content']
+            return og_title['content'].strip()
 
+        # twitter:title
         twitter_title = soup.find('meta', attrs={'name': 'twitter:title'})
         if twitter_title and twitter_title.get('content'):
-            return twitter_title['content']
+            return twitter_title['content'].strip()
 
+        # page title
         title_tag = soup.find('title')
         if title_tag:
             return title_tag.get_text(strip=True)
 
         return urlparse(url).netloc
 
-    def _extract_content(self, soup: BeautifulSoup) -> str:
-        """Page से main content निकालता है"""
-        main_content = None
+    def _extract_description(self, soup: BeautifulSoup) -> str:
+        """Page માંથી description નીકાળે"""
+        # meta description
+        meta_desc = soup.find('meta', attrs={'name': 'description'})
+        if meta_desc and meta_desc.get('content'):
+            text = meta_desc['content'].strip()
+            if text and len(text) > 20:
+                return text[:500]
 
-        article = soup.find('article')
-        if article:
-            main_content = article
+        # og:description
+        og_desc = soup.find('meta', attrs={'property': 'og:description'})
+        if og_desc and og_desc.get('content'):
+            text = og_desc['content'].strip()
+            if text and len(text) > 20:
+                return text[:500]
 
-        if not main_content:
-            main = soup.find('main')
-            if main:
-                main_content = main
+        # પહેલું paragraph
+        for tag in soup.find_all(['p', 'div', 'summary'], limit=5):
+            text = tag.get_text(strip=True)
+            if text and len(text) > 50:
+                return text[:500]
 
-        if not main_content:
-            for class_name in ['content', 'post-content', 'entry-content', 'article-content', 'post', 'article']:
-                content_div = soup.find('div', class_=class_name)
-                if content_div:
-                    main_content = content_div
-                    break
+        return "વધુ માહિતી માટે મૂળ લેખ વાંચો."
 
-        if not main_content:
-            main_content = soup.find('body')
+    def _extract_image(self, soup: BeautifulSoup, base_url: str) -> Optional[str]:
+        """Featured image નીકાળે"""
+        # og:image
+        og_image = soup.find('meta', property='og:image')
+        if og_image and og_image.get('content'):
+            img_url = og_image['content'].strip()
+            if self._is_valid_image(img_url):
+                return img_url
 
-        if not main_content:
-            return "<p>No content found</p>"
+        # twitter:image
+        twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
+        if twitter_image and twitter_image.get('content'):
+            img_url = twitter_image['content'].strip()
+            if self._is_valid_image(img_url):
+                return img_url
 
-        content_html = ""
-        for element in main_content.find_all(['p', 'h2', 'h3', 'h4', 'blockquote', 'ul', 'ol', 'div']):
-            if element.name in ['script', 'style']:
-                continue
-
-            text = element.get_text(strip=True)
-            if text and len(text) > 10:
-                if element.name == 'div' and len(text) > 500:
-                    continue
-                content_html += str(element) + "\n"
-
-        return content_html if content_html else "<p>No content found</p>"
-
-    def _extract_images(self, soup: BeautifulSoup, base_url: str) -> List[str]:
-        """Page से सभी प्रकार की images निकालता है (JPEG, PNG, WebP, etc.)"""
-        images = []
-        seen_urls = set()
-
-        for img in soup.find_all('img'):
+        # img tags
+        for img in soup.find_all('img', limit=10):
             src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
             if src:
-                full_url = urljoin(base_url, src)
-                if full_url not in seen_urls and self._is_valid_image(full_url):
-                    images.append(full_url)
-                    seen_urls.add(full_url)
+                full_url = urljoin(base_url, src.strip())
+                if self._is_valid_image(full_url):
+                    return full_url
 
-        og_image = soup.find('meta', property='og:image')
-        if og_image and og_image.get('content'):
-            og_url = og_image['content']
-            if og_url not in seen_urls:
-                images.insert(0, og_url)
-                seen_urls.add(og_url)
+        return None
 
-        twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
-        if twitter_image and twitter_image.get('content'):
-            twitter_url = twitter_image['content']
-            if twitter_url not in seen_urls:
-                images.append(twitter_url)
-                seen_urls.add(twitter_url)
+    def _extract_video(self, soup: BeautifulSoup, base_url: str) -> Optional[str]:
+        """Video URL નીકાળે (MP4, iframe, YouTube, etc.)"""
+        video_url = None
 
-        for picture in soup.find_all('picture'):
-            for source in picture.find_all('source'):
-                srcset = source.get('srcset')
-                if srcset:
-                    first_url = srcset.split(',')[0].split()[0]
-                    full_url = urljoin(base_url, first_url)
-                    if full_url not in seen_urls and self._is_valid_image(full_url):
-                        images.append(full_url)
-                        seen_urls.add(full_url)
+        # iframe video
+        for iframe in soup.find_all('iframe', limit=5):
+            src = iframe.get('src', '').strip()
+            if src:
+                lower_src = src.lower()
+                # YouTube
+                if 'youtube' in lower_src or 'youtu.be' in lower_src:
+                    return src
+                # Vimeo
+                if 'vimeo' in lower_src:
+                    return src
+                # અન્ય video platforms
+                if any(p in lower_src for p in ['dailymotion', 'rumble', 'odysee', 'desikahani']):
+                    return src
 
-        return images[:15]
-
-    def _extract_videos(self, soup: BeautifulSoup, base_url: str) -> List[str]:
-        """Page से videos निकालता है (MP4, iframe, YouTube, Vimeo, etc.)"""
-        videos = []
-        seen_urls = set()
-
-        for iframe in soup.find_all('iframe'):
-            src = iframe.get('src', '')
-            if src and any(platform in src for platform in ['youtube', 'youtu.be', 'vimeo', 'dailymotion', 'rumble', 'odysee']):
-                if src not in seen_urls:
-                    videos.append(src)
-                    seen_urls.add(src)
-
-        for video_tag in soup.find_all('video'):
+        # direct video tag
+        for video_tag in soup.find_all('video', limit=5):
             src = video_tag.get('src')
             if src:
-                full_url = urljoin(base_url, src)
-                if full_url not in seen_urls:
-                    videos.append(full_url)
-                    seen_urls.add(full_url)
+                full_url = urljoin(base_url, src.strip())
+                return full_url
 
+            # video source tag
             for source in video_tag.find_all('source'):
                 src = source.get('src')
-                video_type = source.get('type', '')
-                if src and ('video/mp4' in video_type or 'video' in video_type):
-                    full_url = urljoin(base_url, src)
-                    if full_url not in seen_urls:
-                        videos.append(full_url)
-                        seen_urls.add(full_url)
+                if src:
+                    full_url = urljoin(base_url, src.strip())
+                    if full_url.lower().endswith(('.mp4', '.webm', '.m4v')):
+                        return full_url
 
-        for elem in soup.find_all(['div', 'a'], class_=lambda x: x and 'video' in x.lower()):
+        # meta video tags
+        og_video = soup.find('meta', property='og:video')
+        if og_video and og_video.get('content'):
+            video_url = og_video['content'].strip()
+            if video_url and any(x in video_url.lower() for x in ['.mp4', '.m3u8', 'youtube', 'vimeo']):
+                return video_url
+
+        # data-video attributes
+        for elem in soup.find_all(['div', 'a'], limit=10):
             for attr in ['data-video-url', 'data-src', 'data-video']:
                 video_url = elem.get(attr)
-                if video_url and video_url not in seen_urls:
-                    videos.append(video_url)
-                    seen_urls.add(video_url)
-
-        return videos[:10]
-
-    def _extract_thumbnail(self, soup: BeautifulSoup, images: List[str]) -> Optional[str]:
-        """Thumbnail image निकालता है"""
-        og_image = soup.find('meta', property='og:image')
-        if og_image and og_image.get('content'):
-            return og_image['content']
-
-        twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
-        if twitter_image and twitter_image.get('content'):
-            return twitter_image['content']
-
-        if images:
-            return images[0]
+                if video_url:
+                    full_url = urljoin(base_url, video_url.strip())
+                    if any(x in full_url.lower() for x in ['.mp4', '.m3u8', 'youtube', 'vimeo']):
+                        return full_url
 
         return None
 
     def _is_valid_image(self, url: str) -> bool:
+        """Check કે image URL valid છે કે નહીં"""
         if not url:
             return False
 
-        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp']
-        invalid_patterns = ['ads', 'tracking', 'pixel', 'spacer', '1x1', 'favicon']
-
         url_lower = url.lower()
-        if any(pattern in url_lower for pattern in invalid_patterns):
+
+        # Invalid patterns
+        if any(x in url_lower for x in ['ads', 'tracking', 'pixel', 'spacer', '1x1', 'favicon']):
             return False
 
-        if any(url_lower.endswith(ext) for ext in valid_extensions):
+        # Valid extensions
+        if any(url_lower.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp']):
             return True
 
+        # CDNs
         if any(cdn in url_lower for cdn in ['cloudinary', 'imgix', 'imageserve', 'pbs.twimg', 'imgur']):
             return True
 
         return False
 
 # =====================================
-# HTML Content Builder with Ad Injection
+# HTML Template Renderer with Video Player
 # =====================================
-class HTMLContentBuilder:
-    """Scraped content को rich HTML में convert करता है और ads inject करता है"""
+class BlogHTMLRenderer:
+    """Scraped data ને custom HTML template મા render કરે"""
+
+    # આપેલું HTML template - VIDEO PLAYER + ADS + CUSTOM DESIGN
+    TEMPLATE = """
+<div id="ump2026">
+
+  <h1 class="ump-title">{POST_TITLE}</h1>
+
+  <div class="ump-video-notice">
+    <div class="ump-notice-icon">👇</div>
+    <div class="ump-notice-text">
+      <strong>વિડિયો જોવા માટે નીચે સ્ક્રોલ કરો</strong>
+      <span>નીચે Video Player આપેલ છે</span>
+    </div>
+    <a href="#umpVideoPlayer" class="ump-watch-button">▶ Watch Video</a>
+  </div>
+
+  <div class="ump-ad ump-ad-468">
+    <script>
+      atOptions = {{
+        'key' : 'c02c0defb48d592cc7e25fbb0115e63a',
+        'format' : 'iframe',
+        'height' : 60,
+        'width' : 468,
+        'params' : {{}}
+      }};
+    </script>
+    <script src="https://sponsorinserttimeout.com/c02c0defb48d592cc7e25fbb0115e63a/invoke.js"></script>
+  </div>
+
+  <div class="ump-description">{POST_DESCRIPTION}</div>
+
+  {IMAGE_BLOCK}
+
+  <div class="ump-ad ump-native-ad">
+    <script async="async" data-cfasync="false" src="https://sponsorinserttimeout.com/98ba824931c676f939dd9b860ee5df26/invoke.js"></script>
+    <div id="container-98ba824931c676f939dd9b860ee5df26"></div>
+  </div>
+
+  <div class="ump-scroll-reminder">
+    👇 <strong>થોડું નીચે સ્ક્રોલ કરો — Video Player અહીં છે</strong>
+  </div>
+
+  <div id="umpVideoPlayer" class="ump-player-box">
+    <div id="umpLoading" class="ump-loading">Loading Video Player...</div>
+    <div id="umpPlayer"></div>
+  </div>
+
+  <div id="umpDownloadBox" class="ump-download-box" style="display:none;">
+    <a id="umpDownload" class="ump-download-button" href="#" target="_blank" rel="noopener">⬇️ Download Video</a>
+  </div>
+
+  <div class="ump-smart-link">
+    <a href="https://sponsorinserttimeout.com/ev5dpcs4vh?key=cb3a4c8dd890dc920a863efe7564cdac" target="_blank" rel="nofollow noopener">
+      ▶ Continue / Watch
+    </a>
+  </div>
+
+  <div class="ump-ad ump-ad-728">
+    <script>
+      atOptions = {{
+        'key' : 'a0a802a872bc486ec685fb758c8eef4b',
+        'format' : 'iframe',
+        'height' : 90,
+        'width' : 728,
+        'params' : {{}}
+      }};
+    </script>
+    <script src="https://sponsorinserttimeout.com/a0a802a872bc486ec685fb758c8eef4b/invoke.js"></script>
+  </div>
+
+  <div class="ump-final-info">
+    <strong>🎬 Video Player</strong>
+    <p>ઉપરના Player માંથી વિડિયો ચલાવી શકો છો.</p>
+  </div>
+
+</div>
+
+{CSS_STYLES}
+
+<script>
+{PLAYER_SCRIPT}
+</script>
+
+<script src="https://sponsorinserttimeout.com/ec/86/73/ec867370afff042880ed8bcfe2b6caaa.js"></script>
+"""
+
+    CSS_STYLES = """
+<style>
+#ump2026{
+  width:100%;
+  max-width:900px;
+  margin:15px auto;
+  padding:10px;
+  box-sizing:border-box;
+  font-family:Arial, Helvetica, sans-serif;
+}
+
+#ump2026 .ump-title{
+  margin:0 0 18px;
+  padding:0;
+  font-size:28px;
+  line-height:1.4;
+  font-weight:700;
+  text-align:center;
+}
+
+#ump2026 .ump-video-notice{
+  width:100%;
+  box-sizing:border-box;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin:15px 0 20px;
+  padding:14px;
+  background:linear-gradient(135deg, #fff7d6, #fff1a8);
+  border:2px solid #f0c400;
+  border-radius:12px;
+  box-shadow:0 4px 12px rgba(0,0,0,.10);
+}
+
+#ump2026 .ump-notice-icon{
+  font-size:28px;
+  animation:umpArrowMove 1s infinite;
+}
+
+#ump2026 .ump-notice-text{
+  flex:1;
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+
+#ump2026 .ump-notice-text strong{
+  font-size:16px;
+  color:#222;
+}
+
+#ump2026 .ump-notice-text span{
+  font-size:13px;
+  color:#555;
+}
+
+#ump2026 .ump-watch-button{
+  display:inline-block;
+  white-space:nowrap;
+  padding:10px 15px;
+  background:#e60000;
+  color:#fff !important;
+  text-decoration:none !important;
+  border-radius:8px;
+  font-size:14px;
+  font-weight:bold;
+}
+
+#ump2026 .ump-watch-button:hover{
+  opacity:.85;
+}
+
+@keyframes umpArrowMove{
+  0%,100%{ transform:translateY(0); }
+  50%{ transform:translateY(7px); }
+}
+
+#ump2026 .ump-description{
+  margin:15px 0 20px;
+  font-size:16px;
+  line-height:1.75;
+  color:#222;
+}
+
+#ump2026 .ump-image{
+  width:100%;
+  margin:15px 0 20px;
+  text-align:center;
+}
+
+#ump2026 .ump-image img{
+  width:100%;
+  max-width:900px;
+  height:auto;
+  display:block;
+  margin:auto;
+  border-radius:12px;
+}
+
+#ump2026 .ump-ad{
+  width:100%;
+  text-align:center;
+  margin:20px auto;
+  overflow:hidden;
+}
+
+#ump2026 .ump-ad-468{ min-height:60px; }
+#ump2026 .ump-ad-728{ min-height:90px; }
+#ump2026 .ump-native-ad{ min-height:100px; }
+
+#ump2026 .ump-scroll-reminder{
+  width:100%;
+  box-sizing:border-box;
+  text-align:center;
+  margin:18px 0;
+  padding:12px;
+  background:#eef7ff;
+  border:1px dashed #1683ff;
+  border-radius:8px;
+  color:#1261a0;
+  font-size:14px;
+}
+
+#ump2026 .ump-player-box{
+  width:100%;
+  min-height:220px;
+  background:#000;
+  border-radius:12px;
+  overflow:hidden;
+  margin:20px 0;
+  position:relative;
+}
+
+#ump2026 #umpPlayer{
+  width:100%;
+}
+
+#ump2026 #umpPlayer video{
+  width:100%;
+  height:auto;
+  min-height:200px;
+  display:block;
+  background:#000;
+}
+
+#ump2026 #umpPlayer iframe{
+  width:100%;
+  height:500px;
+  display:block;
+  border:0;
+  background:#000;
+}
+
+#ump2026 .ump-loading{
+  color:#fff;
+  text-align:center;
+  padding:30px 10px;
+  font-size:15px;
+}
+
+#ump2026 .ump-download-box{
+  text-align:center;
+  margin:20px 0;
+}
+
+#ump2026 .ump-download-button{
+  display:inline-block;
+  padding:13px 28px;
+  background:linear-gradient(135deg, #1769ff, #0044cc);
+  color:#fff !important;
+  text-decoration:none !important;
+  border-radius:8px;
+  font-size:16px;
+  font-weight:bold;
+  box-shadow:0 4px 10px rgba(0,0,0,.18);
+}
+
+#ump2026 .ump-download-button:hover{
+  transform:translateY(-1px);
+}
+
+#ump2026 .ump-smart-link{
+  text-align:center;
+  margin:18px 0;
+}
+
+#ump2026 .ump-smart-link a{
+  display:inline-block;
+  padding:12px 25px;
+  background:#222;
+  color:#fff !important;
+  text-decoration:none !important;
+  border-radius:8px;
+  font-weight:bold;
+}
+
+#ump2026 .ump-final-info{
+  margin:20px 0;
+  padding:15px;
+  background:#f5f5f5;
+  border-radius:10px;
+  text-align:center;
+}
+
+#ump2026 .ump-final-info p{
+  margin:7px 0 0;
+  font-size:14px;
+}
+
+@media(max-width:600px){
+  #ump2026{ padding:8px; }
+  #ump2026 .ump-title{ font-size:22px; }
+  #ump2026 .ump-description{ font-size:15px; }
+  #ump2026 #umpPlayer iframe{ height:260px; }
+  #ump2026 #umpPlayer video{ min-height:200px; }
+}
+
+html{ scroll-behavior:smooth; }
+</style>
+"""
+
+    PLAYER_SCRIPT_TEMPLATE = """
+(function(){{
+  var MEDIA_URL = "{MEDIA_URL}";
+  var player = document.getElementById("umpPlayer");
+  var loading = document.getElementById("umpLoading");
+  var downloadBox = document.getElementById("umpDownloadBox");
+  var download = document.getElementById("umpDownload");
+
+  if(!MEDIA_URL || MEDIA_URL === "MEDIA_URL"){{
+    loading.innerHTML = "Video URL is not configured.";
+    return;
+  }}
+
+  var lowerURL = MEDIA_URL.toLowerCase();
+  var videoExtensions = [".mp4", ".webm", ".ogg", ".ogv", ".m4v", ".mov"];
+  var isDirectVideo = false;
+
+  for(var i = 0; i < videoExtensions.length; i++){{
+    if(lowerURL.indexOf(videoExtensions[i]) !== -1){{
+      isDirectVideo = true;
+      break;
+    }}
+  }}
+
+  var isM3U8 = lowerURL.indexOf(".m3u8") !== -1;
+
+  if(isDirectVideo){{
+    var video = document.createElement("video");
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.setAttribute("controlsList", "nodownload");
+    
+    var source = document.createElement("source");
+    source.src = MEDIA_URL;
+    video.appendChild(source);
+    player.appendChild(video);
+    loading.style.display = "none";
+
+    download.href = MEDIA_URL;
+    download.download = "";
+    downloadBox.style.display = "block";
+  }}
+  else if(isM3U8){{
+    var video = document.createElement("video");
+    video.controls = true;
+    video.playsInline = true;
+    video.style.width = "100%";
+    video.style.background = "#000";
+    player.appendChild(video);
+
+    var hlsScript = document.createElement("script");
+    hlsScript.src = "https://cdn.jsdelivr.net/npm/hls.js@latest";
+    hlsScript.onload = function(){{
+      if(window.Hls && Hls.isSupported()){{
+        var hls = new Hls();
+        hls.loadSource(MEDIA_URL);
+        hls.attachMedia(video);
+      }}
+      else if(video.canPlayType("application/vnd.apple.mpegurl")){{
+        video.src = MEDIA_URL;
+      }}
+      loading.style.display = "none";
+    }};
+    document.head.appendChild(hlsScript);
+  }}
+  else{{
+    var iframe = document.createElement("iframe");
+    iframe.src = MEDIA_URL;
+    iframe.setAttribute("allowfullscreen", "true");
+    iframe.setAttribute("allow", "autoplay; fullscreen; picture-in-picture");
+    iframe.setAttribute("frameborder", "0");
+    iframe.loading = "lazy";
+    player.appendChild(iframe);
+    loading.style.display = "none";
+  }}
+}})();
+"""
 
     @staticmethod
-    def build_post_html(scraped_data: Dict) -> str:
-        html = ""
-
-        if scraped_data.get('thumbnail'):
-            html += f"""
-<div style="text-align: center; margin-bottom: 25px;">
-    <img src="{scraped_data['thumbnail']}"
-         alt="{scraped_data['title']}"
-         style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-</div>
+    def render(post_title: str, description: str, image_url: Optional[str], 
+               video_url: Optional[str], original_url: str) -> str:
+        """Render કરેલું HTML template બનાવે"""
+        
+        # Image block
+        image_block = ""
+        if image_url:
+            image_block = f"""
+  <div class="ump-image">
+    <img src="{image_url}" alt="{post_title}" loading="lazy">
+  </div>
 """
 
-        main_content = scraped_data.get('content', "")
-        html += HTMLContentBuilder._inject_ads_in_content(main_content)
+        # Video URL (embed આવશ્યક છે)
+        video_url_safe = video_url or "about:blank"
 
-        if scraped_data.get('images'):
-            html += "\n<div style='margin-top: 30px; padding-top: 20px; border-top: 2px solid #e0e0e0;'>"
-            html += "<h3 style='color: #333; font-size: 1.3em; margin-bottom: 15px;'>📸 Image Gallery</h3>"
-            html += '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin: 15px 0;">'
-            for idx, img_url in enumerate(scraped_data['images'][:12], 1):
-                html += f"""
-<div style="overflow: hidden; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-    <img src="{img_url}" alt="Image {idx}" style="max-width: 100%; height: auto; display: block;">
-</div>
-"""
-            html += '</div>'
-            html += "</div>"
-            html += ADSTERRA_ADS['banner_728x90']
+        # JavaScript player script
+        player_script = BlogHTMLRenderer.PLAYER_SCRIPT_TEMPLATE.format(
+            MEDIA_URL=video_url_safe
+        )
 
-        if scraped_data.get('videos'):
-            html += "\n<div style='margin-top: 30px; padding-top: 20px; border-top: 2px solid #e0e0e0;'>"
-            html += "<h3 style='color: #333; font-size: 1.3em; margin-bottom: 15px;'>🎥 Videos</h3>"
-
-            for video_url in scraped_data['videos'][:5]:
-                if 'youtube' in video_url or 'youtu.be' in video_url:
-                    video_id = HTMLContentBuilder._extract_youtube_id(video_url)
-                    if video_id:
-                        html += f"""
-<div style="margin-bottom: 20px;">
-    <div style="position: relative; width: 100%; padding-bottom: 56.25%; border-radius: 8px; overflow: hidden;">
-        <iframe
-            width="100%"
-            height="100%"
-            src="https://www.youtube.com/embed/{video_id}"
-            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none;"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-            allowfullscreen>
-        </iframe>
-    </div>
-</div>
-"""
-                elif 'vimeo' in video_url:
-                    html += f"""
-<div style="margin-bottom: 20px;">
-    <div style="position: relative; width: 100%; padding-bottom: 56.25%; border-radius: 8px; overflow: hidden;">
-        <iframe
-            src="{video_url}"
-            width="100%"
-            height="100%"
-            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none;"
-            allow="autoplay; fullscreen; picture-in-picture"
-            allowfullscreen>
-        </iframe>
-    </div>
-</div>
-"""
-                elif video_url.endswith('.mp4'):
-                    html += f"""
-<div style="margin-bottom: 20px;">
-    <video width="100%" height="auto" controls style="border-radius: 8px;">
-        <source src="{video_url}" type="video/mp4">
-        Your browser does not support the video tag.
-    </video>
-</div>
-"""
-                else:
-                    html += f"""
-<div style="margin-bottom: 20px;">
-    <div style="position: relative; width: 100%; padding-bottom: 56.25%; border-radius: 8px; overflow: hidden;">
-        <iframe
-            src="{video_url}"
-            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none;"
-            allowfullscreen>
-        </iframe>
-    </div>
-</div>
-"""
-
-            html += "</div>"
-            html += ADSTERRA_ADS['banner_468x60']
-
-        html += ADSTERRA_ADS['native_banner']
-
-        html += f"""
-<div style="margin-top: 30px; padding: 15px; border-top: 2px solid #e0e0e0; background-color: #f5f5f5; border-radius: 5px;">
-    <p style="margin: 0; color: #666;">
-        <strong>📌 Original Source:</strong>
-        <a href="{scraped_data['original_url']}" target="_blank" style="color: #0066cc; text-decoration: none;">
-            Read Full Article
-        </a>
-    </p>
-</div>
-"""
+        # Final HTML
+        html = BlogHTMLRenderer.TEMPLATE.format(
+            POST_TITLE=post_title,
+            POST_DESCRIPTION=description,
+            IMAGE_BLOCK=image_block,
+            CSS_STYLES=BlogHTMLRenderer.CSS_STYLES,
+            PLAYER_SCRIPT=player_script
+        )
 
         return html
 
-    @staticmethod
-    def _inject_ads_in_content(html: str) -> str:
-        if not html:
-            return html
-
-        paragraphs = html.split('</p>')
-
-        if len(paragraphs) < 4:
-            return html
-
-        result = ""
-        ad_count = 0
-
-        for i, para in enumerate(paragraphs[:-1], 1):
-            result += para + '</p>'
-
-            if i % 3 == 0 and i < len(paragraphs) - 1:
-                if ad_count % 2 == 0:
-                    result += ADSTERRA_ADS['banner_728x90']
-                else:
-                    result += ADSTERRA_ADS['banner_468x60']
-                ad_count += 1
-
-                if ad_count >= 3:
-                    break
-
-        result += paragraphs[-1]
-        return result
-
-    @staticmethod
-    def _extract_youtube_id(url: str) -> Optional[str]:
-        if 'youtube.com/watch' in url:
-            try:
-                return url.split('v=')[1].split('&')[0]
-            except IndexError:
-                return None
-        elif 'youtu.be/' in url:
-            try:
-                return url.split('youtu.be/')[1].split('?')[0]
-            except IndexError:
-                return None
-        elif 'youtube.com/embed/' in url:
-            try:
-                return url.split('embed/')[1].split('?')[0]
-            except IndexError:
-                return None
-
-        return None
-
 # =====================================
-# Blogger API Service with Rate Limit Handling
+# Blogger API Service
 # =====================================
 class BloggerService:
-    """Google Blogger API के साथ interact करता है with exponential backoff for 429 errors"""
+    """Google Blogger API સાથે interact કરે"""
 
     def __init__(self, client_id: str, client_secret: str, refresh_token: str):
         self.client_id = client_id
@@ -542,7 +781,7 @@ class BloggerService:
 
     def authenticate(self) -> bool:
         try:
-            logger.info("🔐 Authenticating with Google Blogger API...")
+            logger.info("🔐 Google Blogger API સાથે authenticate કરી રહ્યા છીએ...")
 
             creds = Credentials(
                 token=None,
@@ -555,16 +794,18 @@ class BloggerService:
 
             creds.refresh(Request())
             self.service = build("blogger", "v3", credentials=creds)
-            logger.info("✅ Authentication successful")
+            logger.info("✅ Authentication સફળ રહ્યું")
             return True
 
         except Exception as e:
-            logger.error(f"❌ Authentication failed: {e}")
+            logger.error(f"❌ Authentication નિષ્ફળ: {e}")
             return False
 
-    def publish_post(self, blog_id: str, title: str, content: str, labels: List[str] = None) -> Optional[str]:
+    def publish_post(self, blog_id: str, title: str, content: str, 
+                    labels: Optional[List[str]] = None) -> Optional[str]:
+        """Blogger માં post publish કરે"""
         if not self.service:
-            logger.error("❌ Service not authenticated")
+            logger.error("❌ Blogger service authenticate નથી")
             return None
 
         max_retries = 4
@@ -582,14 +823,14 @@ class BloggerService:
                 if labels:
                     body["labels"] = labels
 
-                logger.info(f"📤 Publishing post (attempt {retry_count + 1}/{max_retries})...")
+                logger.info(f"📤 Post publish કરી રહ્યા છીએ (attempt {retry_count + 1}/{max_retries})...")
                 request = self.service.posts().insert(blogId=blog_id, body=body)
                 response = request.execute()
 
                 post_id = response.get("id")
                 post_url = response.get("url")
 
-                logger.info(f"✅ Published: {title[:60]}")
+                logger.info(f"✅ Published: {title[:50]}")
                 logger.info(f"   🔗 URL: {post_url}")
                 logger.info(f"   🏷️  Labels: {', '.join(labels) if labels else 'None'}")
 
@@ -604,30 +845,27 @@ class BloggerService:
                     if retry_count < max_retries:
                         wait_time = base_wait_time ** retry_count
                         logger.warning(f"⏸️  RATE LIMITED (429 / Quota Exceeded)")
-                        logger.warning(f"   ⏳ Waiting {wait_time}s before retry {retry_count}/{max_retries-1}")
-                        logger.warning(f"   💡 Consider reducing RSS feeds or increasing cron interval")
+                        logger.warning(f"   ⏳ {wait_time}s પછી retry કરીશું...")
                         time.sleep(wait_time)
                         continue
                     else:
-                        logger.error(f"❌ Max retries ({max_retries}) exceeded for rate limiting")
-                        logger.error(f"❌ Publish failed: {title}")
+                        logger.error(f"❌ Max retries exceeded")
                         return None
 
-                logger.error(f"❌ Publish failed: {title}")
-                logger.error(f"   Error: {e}")
+                logger.error(f"❌ Publish નિષ્ફળ: {e}")
                 return None
 
-        logger.error(f"❌ Publish failed after {max_retries} retries: {title}")
         return None
 
 # =====================================
 # RSS Feed Parser
 # =====================================
 class RSSFeedParser:
-    """RSS feeds को parse करता है"""
+    """RSS feeds parse કરે"""
 
     @staticmethod
-    def parse_feeds(feed_urls: List[str], max_entries: int = 20) -> List[Dict]:
+    def parse_feeds(feed_urls: List[str], max_entries: int = 30) -> List[Dict]:
+        """બધી feeds પાર્સ કરે"""
         all_entries = []
 
         for feed_url in feed_urls:
@@ -635,16 +873,16 @@ class RSSFeedParser:
                 continue
 
             try:
-                logger.info(f"📡 Reading RSS feed: {feed_url}")
+                logger.info(f"📡 RSS feed વાંચી રહ્યા છીએ: {feed_url}")
 
                 feed = feedparser.parse(feed_url)
-                entries = getattr(feed, "entries", [])
+                entries = getattr(feed, "entries", []) or []
 
                 if not entries:
-                    logger.warning(f"   ⚠️ No entries found")
+                    logger.warning(f"   ⚠️ કોઈ entries મળ્યા નહીં")
                     continue
 
-                logger.info(f"   📝 Found {len(entries)} entries")
+                logger.info(f"   📝 {len(entries)} entries મળ્યા")
 
                 for entry in reversed(entries[:max_entries]):
                     entry_link = getattr(entry, "link", None)
@@ -652,34 +890,20 @@ class RSSFeedParser:
                         continue
 
                     entry_title = getattr(entry, "title", "Untitled Post") or "Untitled Post"
-                    entry_published = getattr(entry, "published", "")
+                    entry_published = getattr(entry, "published", "") or getattr(entry, "updated", "")
 
                     all_entries.append({
-                        "url": entry_link,
-                        "title": entry_title,
-                        "published": entry_published,
-                        "feed_url": feed_url
+                        "url": str(entry_link).strip(),
+                        "title": str(entry_title).strip(),
+                        "published": str(entry_published).strip()
                     })
 
             except Exception as e:
-                logger.error(f"   ❌ Error parsing feed: {e}")
+                logger.error(f"   ❌ Feed parse error: {e}")
                 continue
 
-        logger.info(f"🎯 Total {len(all_entries)} entries collected from all feeds")
+        logger.info(f"🎯 કુલ {len(all_entries)} entries એકત્રિત કરેલ")
         return all_entries
-
-    @staticmethod
-    def is_today_post(published_date: str) -> bool:
-        if not published_date:
-            return True
-
-        try:
-            from email.utils import parsedate_to_datetime
-            published = parsedate_to_datetime(published_date)
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            return published.date() == today.date()
-        except Exception:
-            return True
 
 # =====================================
 # Main Automation
@@ -688,107 +912,122 @@ class RSSBloggerAutomation:
     """Main automation orchestrator"""
 
     def __init__(self):
-        self.posted_urls_manager = PostedURLsManager()
-        self.blogger_service = BloggerService(CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN)
+        self.posted_urls = PostedURLsManager()
         self.scraper = ContentScraper()
+        self.blogger = BloggerService(CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN)
 
     def run(self) -> bool:
         logger.info("=" * 100)
-        logger.info("🚀 RSS to Blogger Automation with Content Extraction, Media & Ads")
+        logger.info("🚀 RSS to Blogger Automation with Custom HTML Template")
         logger.info("=" * 100)
-        logger.info(f"⏰ Execution Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"⏰ Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+        # Validate config
         if not all([BLOG_ID, CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, RSS_FEED_URLS]):
-            logger.error("❌ Missing required environment variables")
-            logger.error("   Required: BLOGGER_BLOG_ID, BLOGGER_CLIENT_ID, BLOGGER_CLIENT_SECRET, BLOGGER_REFRESH_TOKEN, RSS_FEED_URLS")
+            logger.error("❌ અપૂર્ણ environment variables")
+            logger.error("   જરૂરી: BLOGGER_BLOG_ID, BLOGGER_CLIENT_ID, BLOGGER_CLIENT_SECRET, BLOGGER_REFRESH_TOKEN, RSS_FEED_URLS")
             return False
 
-        if not self.blogger_service.authenticate():
+        # Authenticate
+        if not self.blogger.authenticate():
             return False
 
-        feed_urls = [url.strip() for url in RSS_FEED_URLS.split(",") if url.strip()]
-        logger.info(f"📡 Reading from {len(feed_urls)} feed(s)")
-        all_entries = RSSFeedParser.parse_feeds(feed_urls, max_entries=30)
+        # Parse feeds
+        feed_urls = [u.strip() for u in RSS_FEED_URLS.split(",") if u.strip()]
+        logger.info(f"📡 {len(feed_urls)} feed(s) વાંચી રહ્યા છીએ")
+        all_entries = RSSFeedParser.parse_feeds(feed_urls, max_entries=40)
 
         if not all_entries:
-            logger.warning("⚠️ No RSS entries found")
+            logger.warning("⚠️ કોઈ entries મળ્યા નહીં")
             return True
 
-        todays_posts = [e for e in all_entries if RSSFeedParser.is_today_post(e.get("published", ""))]
-        other_posts = [e for e in all_entries if not RSSFeedParser.is_today_post(e.get("published", ""))]
-        to_process = todays_posts + other_posts
+        # Filter only new entries
+        new_entries = []
+        for entry in all_entries:
+            url = entry.get("url", "").strip()
+            if url and not self.posted_urls.is_posted(url):
+                new_entries.append(entry)
 
-        logger.info(f"📅 Today's Posts: {len(todays_posts)}")
-        logger.info(f"📆 Other Posts: {len(other_posts)}")
+        logger.info(f"🆕 {len(new_entries)} નવી entries મળી")
 
-        logger.info("\n📝 Processing & Publishing Posts with Media")
+        if not new_entries:
+            logger.info("✅ કોઈ નવી entries નથી. પોસ્ટ કરવા માટે કશું નથી.")
+            return True
+
+        logger.info("\n📝 Processing & Publishing Posts")
         logger.info("-" * 100)
 
         published_count = 0
-        skipped_count = 0
         failed_count = 0
 
-        for idx, entry in enumerate(to_process, 1):
-            entry_url = entry["url"]
-            entry_title = entry["title"]
+        for idx, entry in enumerate(new_entries, 1):
+            entry_url = entry.get("url", "").strip()
+            entry_title = entry.get("title", "Untitled Post").strip()
 
-            logger.info(f"\n[{idx}/{len(to_process)}] Processing: {entry_title[:60]}...")
+            logger.info(f"\n[{idx}/{len(new_entries)}] Processing: {entry_title[:70]}")
 
-            if self.posted_urls_manager.is_posted(entry_url):
-                logger.info("   ⏭️  SKIPPED (already posted)")
-                skipped_count += 1
-                continue
-
-            logger.info("   🕷️  Scraping content with images and videos...")
+            # Scrape content
             scraped_data = self.scraper.scrape_post(entry_url)
 
             if not scraped_data:
-                logger.warning("   ⚠️ Failed to scrape, using fallback content")
-                html_content = f"""
-<div style="background-color: #f9f9f9; padding: 15px; border-left: 4px solid #e0e0e0; border-radius: 5px;">
-    <p>📌 <strong>Full content available at:</strong> <a href="{entry_url}" target="_blank" style="color: #0066cc;">Read Original Post</a></p>
-</div>
-"""
+                logger.warning("   ⚠️ Scrape નિષ્ફળ - Fallback using RSS data")
+                title = entry_title
+                description = "વધુ માહિતી માટે મૂળ લેખ વાંચો."
+                image = None
+                video = None
             else:
-                logger.info(f"      📊 Media found: {len(scraped_data.get('images', []))} images, {len(scraped_data.get('videos', []))} videos")
-                html_content = HTMLContentBuilder.build_post_html(scraped_data)
+                title = scraped_data.get("title") or entry_title
+                description = scraped_data.get("description") or "વધુ માહિતી માટે મૂળ લેખ વાંચો."
+                image = scraped_data.get("image")
+                video = scraped_data.get("video")
 
-            logger.info("   📤 Publishing to Blogger...")
-            labels = [AUTO_POST_LABEL, "Automated", "Curated", "Media"]
+            logger.info(f"      📊 Media: Image={bool(image)}, Video={bool(video)}")
 
-            post_id = self.blogger_service.publish_post(
+            # Render HTML
+            html_content = BlogHTMLRenderer.render(
+                title,
+                description,
+                image,
+                video,
+                entry_url
+            )
+
+            # Publish
+            logger.info("   📤 Blogger માં publish કરી રહ્યા છીએ...")
+            labels = [AUTO_POST_LABEL, "Automated", "RSS Feed", "Custom Template"]
+
+            post_id = self.blogger.publish_post(
                 BLOG_ID,
-                entry_title,
+                title,
                 html_content,
                 labels=labels
             )
 
             if post_id:
-                self.posted_urls_manager.add(entry_url)
+                self.posted_urls.add(entry_url)
+                self.posted_urls.save()
                 published_count += 1
 
-                if idx < len(to_process):
-                    logger.info("   ⏳ Waiting 3 seconds before next post...")
-                    time.sleep(3)
+                if idx < len(new_entries):
+                    logger.info("   ⏳ આગલી post માટે 4 સેકંડ રાહ જોઈશું...")
+                    time.sleep(4)
             else:
                 failed_count += 1
-                logger.warning("   ⚠️ Failed to publish")
+                logger.warning("   ⚠️ Publish નિષ્ફળ")
 
-        self.posted_urls_manager.save()
-
+        # Summary
         logger.info("\n" + "=" * 100)
         logger.info("📊 EXECUTION SUMMARY")
         logger.info("=" * 100)
         logger.info(f"✅ Published: {published_count} posts")
-        logger.info(f"⏭️  Skipped: {skipped_count} posts (already published)")
         logger.info(f"❌ Failed: {failed_count} posts")
-        logger.info(f"📊 Total Posts (All-Time): {len(self.posted_urls_manager.urls)}")
+        logger.info(f"📊 Total Posts (All-Time): {len(self.posted_urls.urls)}")
         logger.info("=" * 100)
 
         if published_count > 0 or failed_count == 0:
-            logger.info("✅ Automation completed successfully!")
+            logger.info("✅ Automation સફળ રહ્યું!")
         else:
-            logger.warning("⚠️ Automation completed with issues!")
+            logger.warning("⚠️ Automation કેટલીક સમસ્યાઓ સાથે પૂર્ણ થયું!")
 
         logger.info("=" * 100)
         return True
@@ -802,7 +1041,7 @@ def main():
         success = automation.run()
         sys.exit(0 if success else 1)
     except Exception as e:
-        logger.error(f"❌ Unexpected error: {e}")
+        logger.error(f"❌ અનપેક્ષિત error: {e}")
         import traceback
         logger.error(traceback.format_exc())
         sys.exit(1)
